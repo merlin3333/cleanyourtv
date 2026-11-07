@@ -17,6 +17,7 @@ import android.widget.ImageView;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
@@ -29,7 +30,9 @@ import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-/** Displays and rotates a theme's local wallpaper images while Home is visible. */
+/** Displays and rotates a theme's local wallpaper images while Home is visible.
+ *  With online_wallpaper, a Picsum photo replaces the local one on a timer and the local
+ *  collection returns when that fetch fails. */
 final class WallpaperPlayer {
     private final FrameLayout root;
     private final ImageView image;
@@ -61,6 +64,14 @@ final class WallpaperPlayer {
     private final String latitude, longitude;
     private LocalDate sunDay;
     private int[] sun;
+    /** config.json online_wallpaper. Off leaves this player exactly as it was. */
+    private final boolean online;
+    private final long onlineInterval;
+    private final File onlineFile;
+    private final OnlineWallpaper.Client onlineClient;
+    private long onlineChanged;
+    /** The picture on screen came from the network, so captions.txt does not name it. */
+    private boolean onlineOnScreen;
 
     WallpaperPlayer(Context context, FrameLayout root, Config config) {
         this.root = root;
@@ -90,7 +101,11 @@ final class WallpaperPlayer {
         image.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
         names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
                 ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
-        caption = names.isEmpty() ? null : makeCaption(context, root);
+        online = config.onlineWallpaper;
+        onlineInterval = config.onlineWallpaperMinutes * 60_000L;
+        onlineFile = new File(context.getCacheDir(), "online-wallpaper.tmp");
+        onlineClient = online ? OnlineWallpaper.httpClient() : null;
+        caption = (!names.isEmpty() || online) ? makeCaption(context, root) : null;
         if (config.wallpaperEnabled && !files.isEmpty()) {
             root.addView(image, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
@@ -145,6 +160,7 @@ final class WallpaperPlayer {
         // let Android reclaim its native buffer after rendering releases it instead of recycling it mid-frame.
         current = null;
         displayed = "";
+        onlineOnScreen = false;
         root.setBackgroundColor(backgroundColor);
     }
 
@@ -166,16 +182,27 @@ final class WallpaperPlayer {
     }
 
     void update() {
-        if (!active || closed || loading || files.isEmpty()) return;
+        if (!active || closed || loading) return;
+        if (online && System.currentTimeMillis() - onlineChanged >= onlineInterval) {
+            fetchOnline();
+            return;
+        }
+        if (onlineOnScreen) return;
+        rotateLocal(false);
+    }
+
+    /** The next local picture. {@code force} is the offline path, which does not wait out the local interval. */
+    private void rotateLocal(boolean force) {
+        if (!active || closed || files.isEmpty()) return;
         String previous = preferences.getString("image", "");
         // A picture outside the time of day's group (the group changed) is replaced at once, not after the interval.
         List<File> playable = playable();
         File selected = WallpaperRotation.find(playable, previous);
         long changed = preferences.getLong("changed", 0);
-        if (selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
+        if (force || selected == null || WallpaperRotation.due(changed, System.currentTimeMillis(), interval)) {
             selected = WallpaperRotation.pick(playable, previous, order, random);
         }
-        if (selected == null || selected.getName().equals(displayed)) return;
+        if (selected == null || (!force && selected.getName().equals(displayed))) return;
         File next = selected;
         loading = true;
         decoder.execute(() -> {
@@ -193,6 +220,7 @@ final class WallpaperPlayer {
                     return;
                 }
                 show(bitmap);
+                onlineOnScreen = false;
                 displayed = next.getName();
                 showCaption(true);
                 if (!displayed.equals(previous) || changed == 0) {
@@ -201,6 +229,54 @@ final class WallpaperPlayer {
                 }
             });
         });
+    }
+
+    /** Picsum, off the UI thread. A failed fetch puts the local collection back immediately. */
+    private void fetchOnline() {
+        loading = true;
+        final long started = System.currentTimeMillis();
+        decoder.execute(() -> {
+            OnlineWallpaper.Fetch fetch = OnlineWallpaper.retrieve(onlineClient, started);
+            Bitmap bitmap = null;
+            if (fetch.ok()) {
+                try (FileOutputStream out = new FileOutputStream(onlineFile)) {
+                    out.write(fetch.body);
+                    bitmap = decode(onlineFile);
+                } catch (Exception failure) {
+                    bitmap = null;
+                } finally {
+                    if (onlineFile.exists()) onlineFile.delete();
+                }
+            }
+            Bitmap ready = bitmap;
+            root.post(() -> {
+                loading = false;
+                if (closed || !active) {
+                    if (ready != null) ready.recycle();
+                    return;
+                }
+                if (ready != null) {
+                    show(ready);
+                    onlineOnScreen = true;
+                    onlineChanged = System.currentTimeMillis();
+                    showCredit();
+                    return;
+                }
+                onlineOnScreen = false;
+                onlineChanged = System.currentTimeMillis();
+                Log.w("TvHome.Wallpaper", "Online photo unavailable (" + fetch.error + "); using the local collection");
+                rotateLocal(true);
+            });
+        });
+    }
+
+    /** Source credit for a network photo. Local captions.txt names are not used. */
+    private void showCredit() {
+        if (caption == null) return;
+        caption.animate().cancel();
+        caption.setText(OnlineWallpaper.CREDIT);
+        caption.setContentDescription(OnlineWallpaper.CREDIT);
+        caption.setAlpha(1f);
     }
 
     /**
@@ -234,6 +310,7 @@ final class WallpaperPlayer {
     /** The displayed picture's name, faded across a change; a picture without a name hides the caption. */
     private void showCaption(boolean fade) {
         if (caption == null) return;
+        onlineOnScreen = false;
         String name = names.get(displayed);
         caption.animate().cancel();
         if (name == null) {
