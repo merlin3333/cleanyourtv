@@ -31,8 +31,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 /** Displays and rotates a theme's local wallpaper images while Home is visible.
- *  With online_wallpaper, a Picsum photo replaces the local one on a timer and the local
- *  collection returns when that fetch fails. */
+ *  With online_wallpaper, today's Bing photo is shown while Home is visible. The local
+ *  collection is used when that photo has never been saved and Bing does not answer.
+ *  Picsum is used only when online_wallpaper_source is exactly picsum. */
 final class WallpaperPlayer {
     private final FrameLayout root;
     private final ImageView image;
@@ -66,10 +67,12 @@ final class WallpaperPlayer {
     private int[] sun;
     /** config.json online_wallpaper. Off leaves this player exactly as it was. */
     private final boolean online;
-    private final long onlineInterval;
+    /** Bing unless the theme set online_wallpaper_source to picsum. */
+    private final boolean bing;
     private final File onlineFile;
+    private final File bingImage;
     private final OnlineWallpaper.Client onlineClient;
-    private long onlineChanged;
+    private String bingStart = "";
     /** The picture on screen came from the network, so captions.txt does not name it. */
     private boolean onlineOnScreen;
 
@@ -102,14 +105,15 @@ final class WallpaperPlayer {
         names = config.wallpaperCaptions && config.wallpaperEnabled && !files.isEmpty()
                 ? WallpaperCaptions.read(files.get(0).getParentFile()) : Collections.emptyMap();
         online = config.onlineWallpaper;
-        onlineInterval = config.onlineWallpaperMinutes * 60_000L;
+        bing = online && !"picsum".equals(config.onlineWallpaperSource);
         onlineFile = new File(context.getCacheDir(), "online-wallpaper.tmp");
+        bingImage = new File(context.getFilesDir(), BingDaily.IMAGE_NAME);
         onlineClient = online ? OnlineWallpaper.httpClient() : null;
         caption = (!names.isEmpty() || online) ? makeCaption(context, root) : null;
-        if (config.wallpaperEnabled && !files.isEmpty()) {
+        if (config.wallpaperEnabled && (bing || !files.isEmpty())) {
             root.addView(image, 0, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-            showFirst();
+            if (!showSavedBing()) showFirst();
         }
     }
 
@@ -183,8 +187,14 @@ final class WallpaperPlayer {
 
     void update() {
         if (!active || closed || loading) return;
-        if (online && System.currentTimeMillis() - onlineChanged >= onlineInterval) {
-            fetchOnline();
+        if (bing) {
+            if (BingDaily.shouldFetch(preferences.getString("bing_checked", ""), today(),
+                    preferences.getLong("bing_failed", 0), System.currentTimeMillis())) {
+                fetchOnline();
+                return;
+            }
+            if (onlineOnScreen) return;
+            rotateLocal(false);
             return;
         }
         if (onlineOnScreen) return;
@@ -231,51 +241,97 @@ final class WallpaperPlayer {
         });
     }
 
-    /** Picsum, off the UI thread. A failed fetch puts the local collection back immediately. */
+    /** Saved Bing photo, if the file and its copyright line are both usable. */
+    private boolean showSavedBing() {
+        String copy = preferences.getString("bing_copy", "");
+        if (!bing || !bingImage.isFile() || copy.isEmpty()) return false;
+        Bitmap bitmap = decode(bingImage);
+        if (bitmap == null) return false;
+        show(bitmap);
+        onlineOnScreen = true;
+        bingStart = preferences.getString("bing_start", "");
+        showCredit(copy);
+        return true;
+    }
+
+    private static String today() {
+        return java.time.LocalDate.now().format(java.time.format.DateTimeFormatter.BASIC_ISO_DATE);
+    }
+
+    /** Bing once a day. A failure never calls Picsum. */
     private void fetchOnline() {
         loading = true;
-        final long started = System.currentTimeMillis();
+        final String today = today();
         decoder.execute(() -> {
-            OnlineWallpaper.Fetch fetch = OnlineWallpaper.retrieve(onlineClient, started);
             Bitmap bitmap = null;
-            if (fetch.ok()) {
-                try (FileOutputStream out = new FileOutputStream(onlineFile)) {
-                    out.write(fetch.body);
-                    bitmap = decode(onlineFile);
-                } catch (Exception failure) {
-                    bitmap = null;
-                } finally {
-                    if (onlineFile.exists()) onlineFile.delete();
-                }
+            String[] photo = null;
+            boolean same = false;
+            String credit = "";
+            if (bing) {
+                OnlineWallpaper.Fetch archive = OnlineWallpaper.retrieveUrl(onlineClient, BingDaily.ARCHIVE);
+                photo = archive.ok()
+                        ? BingDaily.parse(new String(archive.body, java.nio.charset.StandardCharsets.UTF_8)) : null;
+                same = photo != null && photo[0].equals(bingStart) && bingImage.isFile();
+                credit = photo == null ? "" : photo[1];
+                if (photo != null && !same) bitmap = bitmapFrom(OnlineWallpaper.retrieveUrl(onlineClient, photo[2]), true);
             }
             Bitmap ready = bitmap;
+            String[] parsed = photo;
+            boolean unchanged = same;
+            String line = credit;
             root.post(() -> {
                 loading = false;
                 if (closed || !active) {
                     if (ready != null) ready.recycle();
                     return;
                 }
-                if (ready != null) {
-                    show(ready);
-                    onlineOnScreen = true;
-                    onlineChanged = System.currentTimeMillis();
-                    showCredit();
+                if (bing && parsed != null && (unchanged || ready != null)) {
+                    preferences.edit().putString("bing_start", parsed[0])
+                            .putString("bing_copy", parsed[1])
+                            .putString("bing_checked", today).putLong("bing_failed", 0).apply();
+                    bingStart = parsed[0];
+                    if (ready != null) {
+                        show(ready);
+                        onlineOnScreen = true;
+                        showCredit(line);
+                    }
                     return;
                 }
-                onlineOnScreen = false;
-                onlineChanged = System.currentTimeMillis();
-                Log.w("TvHome.Wallpaper", "Online photo unavailable (" + fetch.error + "); using the local collection");
-                rotateLocal(true);
+                if (ready != null) ready.recycle();
+                if (bing) preferences.edit().putLong("bing_failed", System.currentTimeMillis()).apply();
+                if (!onlineOnScreen) rotateLocal(true);
             });
         });
     }
 
+    private Bitmap bitmapFrom(OnlineWallpaper.Fetch fetch, boolean keep) {
+        if (!fetch.ok()) return null;
+        Bitmap bitmap = null;
+        try (FileOutputStream out = new FileOutputStream(onlineFile)) {
+            out.write(fetch.body);
+            bitmap = decode(onlineFile);
+        } catch (Exception failure) {
+            return null;
+        } finally {
+            if (onlineFile.exists()) onlineFile.delete();
+        }
+        if (bitmap != null && keep) {
+            try (FileOutputStream out = new FileOutputStream(bingImage)) {
+                out.write(fetch.body);
+            } catch (Exception failure) {
+                bitmap.recycle();
+                return null;
+            }
+        }
+        return bitmap;
+    }
+
     /** Source credit for a network photo. Local captions.txt names are not used. */
-    private void showCredit() {
-        if (caption == null) return;
+    private void showCredit(String credit) {
+        if (caption == null || credit == null || credit.isEmpty()) return;
         caption.animate().cancel();
-        caption.setText(OnlineWallpaper.CREDIT);
-        caption.setContentDescription(OnlineWallpaper.CREDIT);
+        caption.setText(credit);
+        caption.setContentDescription(credit);
         caption.setAlpha(1f);
     }
 

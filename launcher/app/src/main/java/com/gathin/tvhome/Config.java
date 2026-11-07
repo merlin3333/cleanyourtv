@@ -279,10 +279,12 @@ final class Config {
     final boolean singleRow;
     /** With single_row, the band runs behind every app in the row, not only the dock apps (config.xml, dock_band_all). */
     final boolean dockBandAll;
-    /** Fetch a Picsum photo while Home is visible (config.json, online_wallpaper). Off unless a theme sets it. */
+    /** Today's Bing photo while Home is visible (config.json, online_wallpaper). Off unless a theme sets it. */
     final boolean onlineWallpaper;
-    /** Minutes between those fetches, 5 to 240 (config.json, online_wallpaper_minutes). */
+    /** Minutes between Picsum fetches. Bing ignores this and checks once a day. */
     final int onlineWallpaperMinutes;
+    /** {@code picsum} only when set exactly. Anything else, including a missing key, is Bing. */
+    final String onlineWallpaperSource;
 
     private Config(List<String> dockApps, boolean fillDock, List<String> hiddenApps, List<String> libraryApps, List<String> libraryExcludedApps, String liveTvPackage,
                    String liveTvAction, String liveTvInputId, Map<String, String> launchActions, Map<String, String> appLabels,
@@ -299,7 +301,7 @@ final class Config {
                    boolean handleViewInputs, boolean tileMenu, boolean dockEvenPadding, boolean dockBand, boolean cinematicDots, boolean cinematicWhiteFocus, boolean wifiStatusColor, int cinematicScrim, int cinematicArt,
                    Map<String, Set<String>> wallpaperMoods, boolean gamepadPassthrough, boolean consumeVolumeKeys, boolean homeIgnoreChannelKeys, boolean powerOnHome, boolean homeLongPressHome, boolean wifiStatusWarnings, List<String> topBarApps, boolean showGreeting, boolean headerWhite, boolean clockWallpaper, int clockWallpaperDim, boolean clockGlow, String glassStyle, boolean singleRow, boolean dockBandAll, boolean lunarDate, int lunarUtcOffset, boolean dateBelowClock, boolean vpnPill, String locale, boolean powerOnHomeAlways, boolean inputsConnectedOnly, boolean inputsCecStateOnly,
                    int openOnStartNetworkWait, boolean openOnStartOnWake, boolean iconOnlyVpn, String clockFormat, boolean backOpensClock, boolean glowSnap,
-                   boolean onlineWallpaper, int onlineWallpaperMinutes) {
+                   boolean onlineWallpaper, int onlineWallpaperMinutes, String onlineWallpaperSource) {
         this.handleViewInputs = handleViewInputs;
         this.tileMenu = tileMenu;
         this.inputKeycodes = inputKeycodes;
@@ -353,6 +355,7 @@ final class Config {
         this.glowSnap = glowSnap;
         this.onlineWallpaper = onlineWallpaper;
         this.onlineWallpaperMinutes = onlineWallpaperMinutes;
+        this.onlineWallpaperSource = onlineWallpaperSource;
         this.libraryButton = libraryButton;
         this.showLibraryPill = showLibraryPill;
         this.wifiLabelWidth = wifiLabelWidth;
@@ -687,6 +690,7 @@ final class Config {
         boolean onlineWallpaper = json != null && bool(json, "online_wallpaper", false);
         int onlineWallpaperMinutes = json == null ? OnlineWallpaper.DEFAULT_MINUTES
                 : integer(json, "online_wallpaper_minutes", OnlineWallpaper.DEFAULT_MINUTES, 5, 240);
+        String onlineWallpaperSource = OnlineWallpaper.source(json == null ? "" : string(json, "online_wallpaper_source", ""));
         int wallpaperDim = json == null ? 0 : integer(json, "wallpaper_dim", 0, 0, 90);
         int dockOpacity = json == null ? 100 : integer(json, "dock_opacity", 100, 30, 100);
         dockOpacity = chosenDockOpacity(choices.getInt(DOCK_OPACITY_KEY, -1), dockOpacity);
@@ -731,7 +735,7 @@ final class Config {
                 Math.max(0, Math.min(90, clockWallpaperDim)), clockGlow, glassStyle, singleRow && dockRow, dockBandAll, lunar, lunarOffset,
                 dateBelowClock, vpnPill, locale, powerOnHomeAlways, inputsConnectedOnly, inputsCecStateOnly,
                 Math.max(0, Math.min(600, openOnStartNetworkWait)), openOnStartOnWake, iconOnlyVpn, clockFormat, backOpensClock, glowSnap,
-                onlineWallpaper && wallpaperEnabled, onlineWallpaperMinutes);
+                onlineWallpaper && wallpaperEnabled, onlineWallpaperMinutes, onlineWallpaperSource);
     }
 
     /**

@@ -27,6 +27,11 @@ final class OnlineWallpaper {
 
     private OnlineWallpaper() {}
 
+    /** {@code picsum} only when the theme says that. Every other value is Bing, including a missing key. */
+    static String source(String value) {
+        return "picsum".equals(value) ? "picsum" : "bing";
+    }
+
     /** Minutes between fetches. Out of range, or a missing number, stays at {@link #DEFAULT_MINUTES}. */
     static int minutes(int value) {
         return value < MIN_MINUTES || value > MAX_MINUTES ? DEFAULT_MINUTES : value;
@@ -75,7 +80,10 @@ final class OnlineWallpaper {
     }
 
     static Fetch retrieve(Client client, long nowMillis) {
-        String url = requestUrl(nowMillis);
+        return retrieveUrl(client, requestUrl(nowMillis));
+    }
+
+    static Fetch retrieveUrl(Client client, String url) {
         for (int hop = 0; hop <= MAX_REDIRECTS; hop++) {
             String rejection = reject(url);
             if (rejection != null) return fail(rejection);
