@@ -53,6 +53,7 @@ SCREENSHOT_WANTED = {
     "show_home_settings_shortcut", "show_inputs_pill", "show_network_pill", "show_stats",
     "source_panel_action", "source_panel_extra", "source_panel_service", "stock_home_redirect",
     "tile_menu", "top_menu", "vpn_app", "wallpaper", "wallpaper_captions", "wallpaper_dim",
+    "online_wallpaper", "online_wallpaper_minutes",
     "wallpaper_moods", "wallpaper_order", "wallpaper_true_color", "wifi_label_width",
     "wifi_status_color",
 }
